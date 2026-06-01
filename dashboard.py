@@ -57,6 +57,9 @@ FAPI_BASES = [
     "https://fapi2.binance.com",
     "https://fapi3.binance.com",
 ]
+# 幣安期貨被地理封鎖時的資金費率備援來源 (Bybit 公開 API,不需 key)
+# 資金費率各交易所高度相關,用 Bybit 替代幣安偏差小,可接受
+BYBIT_BASES = ["https://api.bybit.com", "https://api.bytick.com"]
 TIMEOUT = 15
 SLEEP = 0.25
 
@@ -97,6 +100,8 @@ class Binance:
         self.s.headers.update({"User-Agent": "dashboard/1.0"})
         self.spot_base = None
         self.fapi_base = None
+        self.bybit_base = None
+        self.funding_source = None   # 記錄資金費率最終來源
         self.status = {}
 
     def _get(self, bases_attr, bases, path, params):
@@ -142,30 +147,63 @@ class Binance:
         df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
         return df.set_index("open_time").sort_index().iloc[:-1]
 
+    def _get_bybit(self, path, params):
+        """Bybit 公開端點,輪流試備援網域。"""
+        order = ([self.bybit_base] if self.bybit_base else []) + \
+                [b for b in BYBIT_BASES if b != self.bybit_base]
+        last = None
+        for b in order:
+            try:
+                r = self.s.get(f"{b}{path}", params=params, timeout=TIMEOUT)
+                r.raise_for_status()
+                j = r.json()
+                self.bybit_base = b
+                return j
+            except Exception as e:
+                last = e
+        raise RuntimeError(f"bybit {path} all bases failed: {last}")
+
     def funding_now(self, symbol):
-        """抓最近一筆已公布的資金費率。先試 fundingRate,失敗再試 premiumIndex。"""
-        # 方法1: fundingRate 歷史端點
+        """抓最近一筆已公布的資金費率。
+        順序:幣安 fundingRate → 幣安 premiumIndex → Bybit ticker(備援)。"""
+        # 方法1: 幣安 fundingRate
         try:
             data = self._get("fapi_base", FAPI_BASES, "/fapi/v1/fundingRate",
                              {"symbol":symbol,"limit":1})
             if isinstance(data, list) and data and "fundingRate" in data[-1]:
+                self.status[f"funding_{symbol}"] = "ok(binance)"
+                self.funding_source = "binance"
                 return float(data[-1]["fundingRate"])
             else:
-                self.status[f"funding_{symbol}"] = f"fundingRate回傳異常: {str(data)[:120]}"
+                self.status[f"funding_{symbol}"] = f"幣安fundingRate異常: {str(data)[:80]}"
         except Exception as e:
-            self.status[f"funding_{symbol}"] = f"fundingRate失敗: {type(e).__name__}: {str(e)[:80]}"
+            self.status[f"funding_{symbol}"] = f"幣安fundingRate失敗: {type(e).__name__}"
 
-        # 方法2: premiumIndex (即時標記價+資金費率,單一物件)
+        # 方法2: 幣安 premiumIndex
         try:
             data = self._get("fapi_base", FAPI_BASES, "/fapi/v1/premiumIndex",
                              {"symbol":symbol})
             if isinstance(data, dict) and "lastFundingRate" in data:
-                self.status[f"funding_{symbol}"] = "ok(premiumIndex)"
+                self.status[f"funding_{symbol}"] = "ok(binance premiumIndex)"
+                self.funding_source = "binance"
                 return float(data["lastFundingRate"])
-            else:
-                self.status[f"funding_{symbol}"] += f" | premiumIndex異常: {str(data)[:120]}"
+        except Exception:
+            pass
+
+        # 方法3: Bybit ticker 備援 (幣安被地理封鎖時)
+        try:
+            data = self._get_bybit("/v5/market/tickers",
+                                    {"category":"linear","symbol":symbol})
+            if (isinstance(data, dict) and data.get("retCode") == 0
+                    and data.get("result", {}).get("list")):
+                fr = data["result"]["list"][0].get("fundingRate")
+                if fr is not None and fr != "":
+                    self.status[f"funding_{symbol}"] = "ok(bybit備援)"
+                    self.funding_source = "bybit"
+                    return float(fr)
+            self.status[f"funding_{symbol}"] += f" | bybit異常: {str(data)[:80]}"
         except Exception as e:
-            self.status[f"funding_{symbol}"] += f" | premiumIndex失敗: {type(e).__name__}"
+            self.status[f"funding_{symbol}"] += f" | bybit失敗: {type(e).__name__}"
         return None
 
 
@@ -491,6 +529,7 @@ def main():
             "generated_at": datetime.now(timezone.utc).astimezone().isoformat(),
             "interval": INTERVAL, "symbols": symbols,
             "spot_base": bz.spot_base, "fapi_base": bz.fapi_base,
+            "bybit_base": bz.bybit_base, "funding_source": bz.funding_source,
             "failed": failed,
             "funding_diagnostics": bz.status,
             "verified_signal_note": "唯一通過驗證:極端負費率→反彈(條件性弱edge,-0.02%甜蜜點)",
