@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -312,11 +313,22 @@ def push_discord(webhook, assessments, summary_lines, ts, news=None, master_note
     embeds = []
 
     # Opus 大師總結 embed (最置頂,由 routine 中的 Claude 撰寫)
+    # 支援第一行顏色標記 [LEVEL:RED/GOLD/GREEN/GRAY] → 決定色條,顯示時移除該行
     if master_note:
+        note_color = C_GOLD  # 預設
+        note_text = master_note
+        first_nl = master_note.find("\n")
+        first_line = (master_note[:first_nl] if first_nl >= 0 else master_note).strip()
+        m = re.match(r"\[LEVEL:(RED|GOLD|GREEN|GRAY)\]", first_line)
+        if m:
+            level = m.group(1)
+            note_color = {"RED": C_RED, "GOLD": C_GOLD,
+                          "GREEN": C_GREEN, "GRAY": C_GRAY}[level]
+            note_text = master_note[first_nl+1:].lstrip() if first_nl >= 0 else ""
         embeds.append({
             "title": "🎙️ Opus 大師判讀",
-            "description": master_note[:4000],
-            "color": C_GOLD,
+            "description": note_text[:4000],
+            "color": note_color,
         })
 
     # 大師總結 embed (置頂)
