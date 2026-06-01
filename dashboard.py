@@ -142,14 +142,29 @@ class Binance:
         return df.set_index("open_time").sort_index().iloc[:-1]
 
     def funding_now(self, symbol):
-        """抓最近一筆已公布的資金費率。"""
+        """抓最近一筆已公布的資金費率。先試 fundingRate,失敗再試 premiumIndex。"""
+        # 方法1: fundingRate 歷史端點
         try:
             data = self._get("fapi_base", FAPI_BASES, "/fapi/v1/fundingRate",
                              {"symbol":symbol,"limit":1})
-            if data:
+            if isinstance(data, list) and data and "fundingRate" in data[-1]:
                 return float(data[-1]["fundingRate"])
+            else:
+                self.status[f"funding_{symbol}"] = f"fundingRate回傳異常: {str(data)[:120]}"
         except Exception as e:
-            self.status[f"funding_{symbol}"] = f"failed: {type(e).__name__}"
+            self.status[f"funding_{symbol}"] = f"fundingRate失敗: {type(e).__name__}: {str(e)[:80]}"
+
+        # 方法2: premiumIndex (即時標記價+資金費率,單一物件)
+        try:
+            data = self._get("fapi_base", FAPI_BASES, "/fapi/v1/premiumIndex",
+                             {"symbol":symbol})
+            if isinstance(data, dict) and "lastFundingRate" in data:
+                self.status[f"funding_{symbol}"] = "ok(premiumIndex)"
+                return float(data["lastFundingRate"])
+            else:
+                self.status[f"funding_{symbol}"] += f" | premiumIndex異常: {str(data)[:120]}"
+        except Exception as e:
+            self.status[f"funding_{symbol}"] += f" | premiumIndex失敗: {type(e).__name__}"
         return None
 
 
@@ -465,6 +480,7 @@ def main():
             "interval": INTERVAL, "symbols": symbols,
             "spot_base": bz.spot_base, "fapi_base": bz.fapi_base,
             "failed": failed,
+            "funding_diagnostics": bz.status,
             "verified_signal_note": "唯一通過驗證:極端負費率→反彈(條件性弱edge,-0.02%甜蜜點)",
         },
         "master_summary": summary_lines,
