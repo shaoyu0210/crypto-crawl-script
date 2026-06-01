@@ -8,18 +8,18 @@
 做什麼: 抓加密新聞 RSS (近 N 小時) → VADER+加密關鍵字情緒 → 配對到核心幣
        → 回傳結構化摘要 (每幣相關新聞數、平均情緒、重點標題)。
 
-依賴: feedparser, vaderSentiment (或退化為 stdlib;見 fetch)
+依賴: vaderSentiment (情緒);RSS 解析用 Python 內建 urllib + xml.etree,不需 feedparser
 """
 from __future__ import annotations
 
 import re
+import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
-try:
-    import feedparser
-    _HAS_FEEDPARSER = True
-except Exception:
-    _HAS_FEEDPARSER = False
+# RSS 解析改用 stdlib,不再依賴 feedparser (避免 sgmllib3k 安裝問題)
+_HAS_FEEDPARSER = True  # 保留旗標相容性;stdlib 一定可用
 
 try:
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -56,13 +56,57 @@ COIN_ALIASES = {
 
 def _strip(t): return re.sub(r"<[^>]+>", "", t or "")
 
-def _ptime(e):
-    for k in ("published_parsed","updated_parsed"):
-        t = e.get(k)
-        if t:
-            try: return datetime(*t[:6], tzinfo=timezone.utc)
-            except: pass
-    return None
+def _ptime(date_str):
+    """解析 RSS 的 pubDate 字串 (RFC822) 或 ISO 格式為 UTC datetime。"""
+    if not date_str:
+        return None
+    try:
+        dt = parsedate_to_datetime(date_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        pass
+    # 退而求其次:試 ISO 格式 (Atom <updated>)
+    try:
+        s = date_str.strip().replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+def _fetch_rss(url):
+    """用 stdlib 抓取並解析 RSS/Atom,回傳 [{title,link,summary,published_str}]。"""
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        raw = resp.read()
+    root = ET.fromstring(raw)
+    items = []
+    # RSS 2.0: channel/item ; Atom: entry (含 namespace)
+    nodes = root.iter("item")
+    found = False
+    for it in nodes:
+        found = True
+        title = (it.findtext("title") or "").strip()
+        link = (it.findtext("link") or "").strip()
+        summary = it.findtext("description") or ""
+        pub = it.findtext("pubDate") or ""
+        items.append({"title": title, "link": link,
+                      "summary": summary, "published_str": pub})
+    if not found:
+        # 嘗試 Atom (帶 namespace)
+        ns = "{http://www.w3.org/2005/Atom}"
+        for e in root.iter(f"{ns}entry"):
+            title = (e.findtext(f"{ns}title") or "").strip()
+            link_el = e.find(f"{ns}link")
+            link = link_el.get("href") if link_el is not None else ""
+            summary = e.findtext(f"{ns}summary") or e.findtext(f"{ns}content") or ""
+            pub = e.findtext(f"{ns}updated") or e.findtext(f"{ns}published") or ""
+            items.append({"title": title, "link": link or "",
+                          "summary": summary, "published_str": pub})
+    return items
 
 def _label(c):
     return "positive" if c>=0.15 else ("negative" if c<=-0.15 else "neutral")
@@ -90,7 +134,7 @@ def fetch_news_sentiment(symbols_base, window_hours=NEWS_WINDOW_HOURS):
     """回傳每幣的新聞情緒摘要 + 整體市場氛圍。
     symbols_base: 幣代號清單 (如 ['BTC','ETH',...],不含 USDT)。"""
     result = {
-        "available": _HAS_FEEDPARSER and _HAS_VADER,
+        "available": _HAS_VADER,
         "window_hours": window_hours,
         "per_coin": {s: {"count":0,"avg_sentiment":None,"top":[]} for s in symbols_base},
         "market_mood": None,
@@ -99,20 +143,20 @@ def fetch_news_sentiment(symbols_base, window_hours=NEWS_WINDOW_HOURS):
         "note": "情緒未經回測驗證,僅背景資訊,不構成交易方向依據",
     }
     if not result["available"]:
-        result["error"] = "feedparser 或 vaderSentiment 不可用"
+        result["error"] = "vaderSentiment 不可用"
         return result
 
     since = datetime.now(timezone.utc) - timedelta(hours=window_hours)
     all_items = []
     for src in RSS_SOURCES:
         try:
-            feed = feedparser.parse(src["url"], request_headers={"User-Agent": UA})
-            for e in feed.entries:
-                pub = _ptime(e)
+            entries = _fetch_rss(src["url"])
+            for e in entries:
+                pub = _ptime(e.get("published_str"))
                 if pub is None or pub < since: continue
                 title = (e.get("title") or "").strip()
                 if not title: continue
-                summary = _strip(e.get("summary") or e.get("description") or "")[:400]
+                summary = _strip(e.get("summary") or "")[:400]
                 text = f"{title}. {summary}"
                 all_items.append({"title":title,"url":e.get("link") or "",
                     "source":src["name"],"text":text,"sentiment":_score(text)})
