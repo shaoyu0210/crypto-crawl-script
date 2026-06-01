@@ -1,182 +1,249 @@
 # crypto-agent
 
-一支可被排程呼叫的加密貨幣分析程式。每次執行會:
+加密貨幣量化監控系統。根目錄三個 Python 檔案各司其職:
 
-1. 從 CoinGecko 抓核心幣種 OHLCV
-2. 自行計算技術指標 (RSI、MACD、MA20/50/200、布林通道、支撐/壓力)
-3. 從多個 RSS 來源抓近 6 小時新聞並做情緒判讀 (VADER + 加密領域關鍵字)
-4. 綜合算 0–100 信心分數,輸出:
-   - **Tier A (≥ 80)**: 完整進出場建議 (入場區、出場、止損、依據)
-   - **Tier B (< 80)**: 可觀察資訊 (指標讀數、相關新聞、距達標關鍵缺口、後續觀察訊號)
-5. 額外從新聞中辨識**前 5 名被熱議的幣種** (獨立於核心清單)
-6. 產出 Markdown 報告 + 純文字版,並推送到 Discord webhook (含圖表附件)
+```
+features.py        ── 純技術特徵計算 (即時偵測與回測共用的「真相來源」)
+news_sentiment.py  ── 新聞情緒抓取 (背景資訊,未經回測驗證)
+dashboard.py       ── 主程式 (整合特徵 + 費率 + 新聞 → 報告 → 推 Discord)
+```
 
-> **重要聲明**:本系統的「信心分數」是訊號強弱的**主觀量化評估**,並非經回測驗證之勝率,不代表獲利保證。
-> 加密貨幣風險極高,所有進出場與資金控管請自行判斷自負風險。
+---
+
+## 設計核心
+
+**只在有實證 edge 時給方向建議,其餘誠實標示「無 edge,觀望」。**
+
+研究結論 (回測 + 樣本外 + 穩健性驗證):
+
+| 訊號 | 結論 |
+|---|---|
+| ✅ **極端負費率 → 反彈** | 唯一通過驗證,主流幣條件性弱 edge,甜蜜點 `-0.02%`,盈虧比薄須自設止損 |
+| ❌ RSI、斐波那契、回歸通道、暴漲暴跌爆量 | 主流幣 1h 線無穩定 edge,僅作「當前狀態描述」 |
+| ❌ 標題級新聞情緒 | 學術結論分歧,本系統僅作背景氛圍展示,不據以進場 |
+
+對齊以上證據,`dashboard.py` 的判讀策略:
+- 有驗證訊號 → 給明確方向 + 真實份量描述 (含 MFE/MAE 預期)
+- 無驗證訊號 → 顯示「無 edge」,描述狀態但不建議進場
+- 大漲大跌 → 標記為「事件警示」,不是進場訊號
+
+---
+
+## 三個檔案
+
+### `features.py` — 技術特徵庫 (純函式)
+
+對單一幣的 OHLCV DataFrame 算所有可重現的特徵。**不做 IO、不做決策。** 即時偵測與回測呼叫同一份函式,確保邏輯一致。
+
+提供的函式:
+
+| 函式 | 用途 |
+|---|---|
+| `rsi_wilder(close, period=14)` | Wilder RSI |
+| `atr(df, period=14)` | Average True Range |
+| `find_swings(df, k=3)` | Pivot/fractal 擺動點 |
+| `fib_retracement(df, k, proximity_pct)` | 斐波回撤位 + 是否貼近 (帶主觀性) |
+| `regression_channel(df, lookback=50, num_std=2.0)` | 線性回歸平行通道 (較客觀) |
+| `compute_features(df, cfg)` | 上面全部彙整為一個 dict |
+
+輸出區分:
+- **`objective`**: 客觀可重現的數字 (RSI、量倍、ATR、報酬率、taker buy 比率、看漲吞噬)
+- **`channel`**: 較客觀 (回歸算出)
+- **`fibonacci`**: 帶主觀性 (擺動點選擇影響結果),會標 `note` 提醒
+
+### `news_sentiment.py` — 新聞情緒 (背景)
+
+抓 5 個英文加密媒體 RSS (Cointelegraph / Decrypt / CryptoSlate / Bitcoinist / NewsBTC),近 6 小時內的標題用 **VADER + 加密關鍵字** 算情緒分。
+
+**重要定位**: 標題級情緒未經回測驗證,在量化上不構成方向依據。本模組僅輸出「整體氛圍」與「每幣相關新聞」作背景。
+
+對外只有一個入口:
+
+```python
+fetch_news_sentiment(symbols_base, window_hours=6)
+# symbols_base = ['BTC','ETH','SOL','BNB','XRP']  # 不含 USDT
+```
+
+回傳結構:
+```json
+{
+  "available": true,
+  "window_hours": 6,
+  "per_coin": {"BTC": {"count": 3, "avg_sentiment": -0.12, "top": [...]}},
+  "market_mood": {"avg_compound": 0.08, "label": "neutral"},
+  "total_news": 28,
+  "failed_sources": [],
+  "note": "情緒未經回測驗證,僅背景資訊,不構成交易方向依據"
+}
+```
+
+實作細節:
+- RSS 解析用 stdlib (`urllib` + `xml.etree`),不依賴 feedparser → 雲端環境更好部署
+- VADER 不可用時整個模組標 `available: false`,dashboard 會顯示「模組不可用」而非崩潰
+
+### `dashboard.py` — 主程式
+
+每小時跑一次的入口。流程:
+
+1. **Binance 現貨 klines** (1h, 300 根) — 預設只監控核心 5 主流幣 (BTCUSDT/ETHUSDT/SOLUSDT/BNBUSDT/XRPUSDT)
+2. **資金費率** — 三層 fallback:
+   - Cloud Run proxy (如設 `FUNDING_PROXY_URL`)
+   - 幣安 fapi: `fundingRate` → `premiumIndex`
+   - Bybit `/v5/market/tickers` 備援 (幣安被地理封鎖時)
+3. **算特徵** — 呼叫 `features.compute_features()`
+4. **抓新聞背景** — 呼叫 `news_sentiment.fetch_news_sentiment()`
+5. **產判讀** — `assess()` 對每幣產 verified_signal / direction / confidence / rationale
+6. **大師總結** — `master_summary()` 跨幣彙整 (市場級事件 + 可行動 edge + 固定提醒)
+7. **推 Discord** — 彩色 embed:
+   - 🎙️ Opus 大師判讀 (若有 `--master-note-file`,讀檔內容置頂)
+   - 🧭 量化視角總結 (藍色)
+   - 各幣 embed (金色=驗證訊號 / 紅色=大跌 / 綠色=大漲)
+   - 其餘標的 (灰色,無 edge 觀望)
+   - 📰 新聞背景 (藍色)
+   - 免責 (灰色)
+8. **印 JSON 到 stdout** — 完整結果含 meta、assessments、news_background、discord 狀態
 
 ---
 
 ## 安裝
 
 ```bash
-cd /path/to/crypto-agent
-python3 -m venv .venv          # 已存在則略過
+python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install requests pandas numpy vaderSentiment
 ```
 
-## 設定金鑰
+注意 `dashboard.py` 不依賴 feedparser (用 stdlib 解 RSS)。
+
+## 環境變數
 
 ```bash
-cp .env.example .env
-# 編輯 .env, 填入 DISCORD_WEBHOOK_URL
+# 必要
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/XXX/YYY
+
+# 選用:routine 雲環境連不到交易所時的資金費率代抓 proxy
+FUNDING_PROXY_URL=https://your-cloud-run-proxy.run.app/funding
 ```
 
-金鑰一律由環境變數讀取,絕不寫死也不入 git (`.env` 已在 `.gitignore`)。
-
-### 必要
-
-- `DISCORD_WEBHOOK_URL` — Discord 頻道 → 編輯頻道 → 整合 → Webhook → 新增,複製 URL
-
-### 可選 (預設關閉)
-
-- `COINGECKO_API_KEY` — CoinGecko Pro 金鑰 (免費版不需要)
-- `CRYPTOPANIC_API_TOKEN` — 啟用 CryptoPanic 聚合 (需在 `config/news_sources.yaml` 改 `enabled: true`)
-- `X_API_BEARER_TOKEN` — 啟用 X (Twitter) API Basic tier ($200/月)
-
-## 設定檔
-
-三份 YAML 全部可調:
-
-| 檔案 | 用途 |
-|---|---|
-| `config/coins.yaml` | 核心追蹤幣種清單 (預設 BTC/ETH/SOL/BNB/XRP) |
-| `config/news_sources.yaml` | 新聞 RSS 來源開關、權重、時間窗 |
-| `config/scoring.yaml` | 信心分數因子權重、Tier A 門檻、入場/出場/止損 % |
-
-中文新聞來源 (BlockTempo / ABMedia) 已預備但**預設關閉** (VADER 對中文準確度有限,只用簡單關鍵字規則)。
-
-## 本機執行
+## 用法
 
 ```bash
-.venv/bin/python src/main.py                # 完整流程
-.venv/bin/python src/main.py --no-notify    # 不推 Discord,只產報告檔
-.venv/bin/python src/main.py --no-charts    # 不產圖表
+# 標準:跑全套並推 Discord
+python dashboard.py
+
+# 易讀 JSON 輸出
+python dashboard.py --pretty
+
+# 只跑、不推 Discord (本機驗證用)
+python dashboard.py --no-discord --pretty
+
+# 略過新聞抓取 (新聞 RSS 來源都掛時)
+python dashboard.py --no-news
+
+# 納入動態熱門幣 (預設只監控回測驗證過的 5 主流幣)
+python dashboard.py --include-hot --top 10
+
+# 在 Discord 報告最前加一段 Opus 大師判讀 (從檔讀)
+python dashboard.py --master-note-file /tmp/opus_note.txt
 ```
 
-報告會落地到 `reports/2026-MM-DD_HH-MM.md` 與 `.txt`,圖表在 `reports/charts/<時間戳>/<幣>.png`。
+### `--master-note-file` 格式
 
-## 測試
+文字檔。可選地以 `[LEVEL:RED/GOLD/GREEN/GRAY]` 開頭,決定 embed 顏色:
+
+```
+[LEVEL:GOLD]
+BTC 出現極端負費率訊號,且新聞氛圍轉中性回穩...
+[後面是 Opus 寫的判讀]
+```
+
+未指定 LEVEL 時預設金色。
+
+---
+
+## 輸出範例 (stdout JSON)
+
+```json
+{
+  "meta": {
+    "generated_at": "2026-06-01T18:00:00+08:00",
+    "interval": "1h",
+    "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"],
+    "spot_base": "https://api.binance.com",
+    "fapi_base": "https://fapi.binance.com",
+    "bybit_base": null,
+    "funding_source": "binance",
+    "failed": [],
+    "funding_diagnostics": { "funding_BTCUSDT": "ok(binance)", ... },
+    "verified_signal_note": "唯一通過驗證:極端負費率→反彈(條件性弱edge,-0.02%甜蜜點)"
+  },
+  "master_summary": [
+    "⚪ 目前無通過驗證的可行動訊號。...",
+    "📌 量化提醒:本系統僅..."
+  ],
+  "assessments": [
+    {
+      "symbol": "BTCUSDT",
+      "price": 73516.0,
+      "funding_rate": -0.00005,
+      "event": null,
+      "verified_signal": null,
+      "direction": "觀望 (無明確 edge)",
+      "confidence": "無 edge",
+      "rationale": [],
+      "status_desc": ["RSI 42(中性)", "通道位置 0.31", "量 0.9x"],
+      "ret_recent_pct": -0.4,
+      "rsi": 42.1
+    }
+  ],
+  "news_background": {
+    "available": true,
+    "window_hours": 6,
+    "per_coin": {"BTC": {"count": 5, "avg_sentiment": -0.12, "top": [...]}},
+    "market_mood": {"avg_compound": 0.04, "label": "neutral"},
+    "total_news": 28,
+    "failed_sources": [],
+    "note": "情緒未經回測驗證,僅背景資訊,不構成交易方向依據"
+  },
+  "discord": "ok"
+}
+```
+
+---
+
+## 排程
+
+設計成每小時跑一次。三種部署方式:
+
+### 1. macOS launchd (本機,需電腦開著)
 
 ```bash
-.venv/bin/python -m pytest tests/ -q
+# ~/Library/LaunchAgents/com.crypto-dashboard.plist
+# StartCalendarInterval 設整點
 ```
 
-(全部離線,不打外網。)
-
-## 排程一天 10 次
-
-### macOS (launchd) — 推薦
-
-建立 `~/Library/LaunchAgents/com.crypto-agent.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.crypto-agent</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/Users/YOU/Desktop/crypto-agent/.venv/bin/python</string>
-    <string>/Users/YOU/Desktop/crypto-agent/src/main.py</string>
-  </array>
-  <key>WorkingDirectory</key>
-  <string>/Users/YOU/Desktop/crypto-agent</string>
-  <key>StartCalendarInterval</key>
-  <array>
-    <dict><key>Hour</key><integer>5</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Hour</key><integer>23</integer><key>Minute</key><integer>0</integer></dict>
-  </array>
-  <key>StandardOutPath</key>
-  <string>/Users/YOU/Desktop/crypto-agent/reports/launchd.out</string>
-  <key>StandardErrorPath</key>
-  <string>/Users/YOU/Desktop/crypto-agent/reports/launchd.err</string>
-</dict>
-</plist>
-```
-
-載入:
-
-```bash
-launchctl load ~/Library/LaunchAgents/com.crypto-agent.plist
-launchctl list | grep crypto-agent
-```
-
-### Linux (cron)
-
-`crontab -e`,加入:
+### 2. Linux cron
 
 ```cron
-0 5,7,9,11,13,15,17,19,21,23 * * * cd /path/to/crypto-agent && .venv/bin/python src/main.py >> reports/cron.log 2>&1
+0 * * * * cd /path/to/crypto-agent && .venv/bin/python dashboard.py >> /var/log/crypto-dashboard.log 2>&1
 ```
 
-(10 個整點,5 點到 23 點偶數時。)
+### 3. Claude Code Routine (雲端,可由 Claude Opus 寫 master-note)
 
-## 錯誤處理
+雲端 routine 環境連不到 Binance fapi 時,需另外部署一個 Cloud Run proxy 並設 `FUNDING_PROXY_URL`。
 
-- 個別 RSS 或價格 API 失敗會降級,不中斷流程
-- 缺漏會列在報告「資料來源狀態」(✅ / ⚠️)
-- Tier A 幣種若 OHLCV 抓不到會自動跳過
+---
 
-## 之後想加新通知管道?
+## 設計取捨
 
-```python
-# src/notifiers/telegram.py
-from .base import BaseNotifier
+- **單檔自含 vs 模組化**:`features.py` 與 `news_sentiment.py` 拆出來是為了讓回測腳本能直接 import 同一套邏輯,確保兩邊算出來的數字一致。
+- **預設只監控核心 5 幣**:回測 edge 是在主流幣上驗證,小幣資金費率波動大、雜訊多,訊號可信度低。`--include-hot` 開了會把熱門榜納入但判讀會標「類比參考」。
+- **新聞情緒只當背景**:標題級 VADER 在學術上 edge 微弱,本系統明確不用它當方向依據,只顯示氛圍。
+- **資金費率三層 fallback**:Binance 在某些地區會被擋,Bybit 與 Cloud Run proxy 確保訊號不漏掉。
+- **JSON 同時印到 stdout**:方便 piped 到其他工具或排程器留存歷史。
 
-class TelegramNotifier(BaseNotifier):
-    name = "Telegram"
-    def send(self, summary_text, attachments=None):
-        # POST 到 Telegram Bot API
-        ...
-```
+---
 
-在 `main.py` 多 instantiate 一個即可。
+## 風險聲明
 
-## 專案結構
-
-```
-crypto-agent/
-├── .env.example
-├── .gitignore
-├── README.md
-├── requirements.txt
-├── config/
-│   ├── coins.yaml
-│   ├── news_sources.yaml
-│   └── scoring.yaml
-├── src/
-│   ├── main.py
-│   ├── config_loader.py
-│   ├── data_sources/      # CoinGecko / Binance stub
-│   ├── indicators/        # 自行實作的 TA
-│   ├── news/              # fetcher / sentiment / coin extractor
-│   ├── analysis/          # scorer + 新聞驅動 Top 5
-│   ├── reporting/         # markdown + plain text
-│   ├── notifiers/         # Discord + 抽象介面
-│   ├── charts/            # matplotlib
-│   └── utils/             # logging
-├── tests/
-├── reports/               # 產出 (gitignore)
-└── data/                  # 快取 (gitignore)
-```
+本系統基於歷史回測,僅「極端負費率 → 反彈」具實證支撐且為**條件性弱 edge**;其餘指標與新聞情緒**均未通過驗證**。**不構成投資建議**,過去表現不代表未來。加密貨幣風險極高,任何進出場與資金控管請自行判斷、自負風險、嚴設止損。
