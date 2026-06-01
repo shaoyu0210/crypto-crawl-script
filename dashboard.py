@@ -50,7 +50,12 @@ CORE = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
 
 SPOT_BASES = ["https://api.binance.com", "https://data-api.binance.vision",
               "https://api-gcp.binance.com"]
-FAPI_BASES = ["https://fapi.binance.com"]
+FAPI_BASES = [
+    "https://fapi.binance.com",
+    "https://fapi1.binance.com",
+    "https://fapi2.binance.com",
+    "https://fapi3.binance.com",
+]
 TIMEOUT = 15
 SLEEP = 0.25
 
