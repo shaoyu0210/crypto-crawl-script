@@ -279,7 +279,7 @@ def master_summary(assessments):
 # Discord
 # ════════════════════════════════════════════════════════════════════
 
-def push_discord(webhook, assessments, summary_lines, ts, news=None):
+def push_discord(webhook, assessments, summary_lines, ts, news=None, master_note=None):
     # 排序: 驗證訊號 > 大跌 > 大漲 > 其他
     def rank(a):
         if a.get("verified_signal"): return 0
@@ -290,6 +290,14 @@ def push_discord(webhook, assessments, summary_lines, ts, news=None):
 
     head = f"📊 **量化監控** {ts}"
     embeds = []
+
+    # Opus 大師總結 embed (最置頂,由 routine 中的 Claude 撰寫)
+    if master_note:
+        embeds.append({
+            "title": "🎙️ Opus 大師判讀",
+            "description": master_note[:4000],
+            "color": C_GOLD,
+        })
 
     # 大師總結 embed (置頂)
     embeds.append({
@@ -380,6 +388,8 @@ def main():
     p.add_argument("--no-news", action="store_true", help="略過新聞抓取")
     p.add_argument("--include-hot", action="store_true",
                    help="納入動態熱門幣(預設只監控回測驗證過的主流幣)")
+    p.add_argument("--master-note-file", type=str, default="",
+                   help="讀取一個文字檔作為 Opus 大師判讀,置於報告最前")
     args = p.parse_args()
 
     webhook = os.environ.get("DISCORD_WEBHOOK_URL")
@@ -427,10 +437,20 @@ def main():
         except Exception as e:
             news = {"available": False, "error": f"{type(e).__name__}: {e}"}
 
+    # 讀取 Opus 大師判讀 (由 routine 中的 Claude 寫入檔案)
+    master_note = None
+    if args.master_note_file:
+        try:
+            with open(args.master_note_file, "r", encoding="utf-8") as f:
+                master_note = f.read().strip()
+        except Exception as e:
+            print(f"讀取 master-note-file 失敗: {e}", file=sys.stderr)
+
     discord = "skipped"
     if not args.no_discord:
         try:
-            discord = push_discord(webhook, assessments, summary_lines, ts, news)
+            discord = push_discord(webhook, assessments, summary_lines, ts, news,
+                                   master_note=master_note)
         except Exception as e:
             discord = f"failed: {type(e).__name__}: {e}"
 
