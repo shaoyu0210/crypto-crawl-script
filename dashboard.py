@@ -60,6 +60,9 @@ FAPI_BASES = [
 # 幣安期貨被地理封鎖時的資金費率備援來源 (Bybit 公開 API,不需 key)
 # 資金費率各交易所高度相關,用 Bybit 替代幣安偏差小,可接受
 BYBIT_BASES = ["https://api.bybit.com", "https://api.bytick.com"]
+# 若 routine 環境連不到交易所,可部署一個 Cloud Run proxy 代抓資金費率。
+# 設了此環境變數,funding_now 會「優先」打 proxy 拿全部幣的資金費率。
+FUNDING_PROXY_URL = os.environ.get("FUNDING_PROXY_URL", "").strip()
 TIMEOUT = 15
 SLEEP = 0.25
 
@@ -102,6 +105,8 @@ class Binance:
         self.fapi_base = None
         self.bybit_base = None
         self.funding_source = None   # 記錄資金費率最終來源
+        self._proxy_cache = None     # proxy 回傳的全幣資金費率(一次抓齊)
+        self._proxy_tried = False
         self.status = {}
 
     def _get(self, bases_attr, bases, path, params):
@@ -163,9 +168,38 @@ class Binance:
                 last = e
         raise RuntimeError(f"bybit {path} all bases failed: {last}")
 
+    def _fetch_proxy(self):
+        """一次性向 Cloud Run proxy 拿全部幣的資金費率,快取起來。"""
+        if self._proxy_tried:
+            return
+        self._proxy_tried = True
+        if not FUNDING_PROXY_URL:
+            return
+        try:
+            r = self.s.get(FUNDING_PROXY_URL, timeout=TIMEOUT)
+            r.raise_for_status()
+            d = r.json()
+            if isinstance(d, dict) and "funding" in d:
+                self._proxy_cache = d["funding"]
+                if d.get("source"):
+                    self.funding_source = f"proxy({d['source']})"
+                self.status["proxy"] = f"ok source={d.get('source')}"
+        except Exception as e:
+            self.status["proxy"] = f"proxy失敗: {type(e).__name__}: {str(e)[:80]}"
+
     def funding_now(self, symbol):
         """抓最近一筆已公布的資金費率。
-        順序:幣安 fundingRate → 幣安 premiumIndex → Bybit ticker(備援)。"""
+        順序:Cloud Run proxy(若設) → 幣安 fundingRate → premiumIndex → Bybit。"""
+        # 方法0: Cloud Run proxy (routine 環境連不到交易所時的主來源)
+        if FUNDING_PROXY_URL:
+            self._fetch_proxy()
+            if self._proxy_cache is not None:
+                fr = self._proxy_cache.get(symbol)
+                self.status[f"funding_{symbol}"] = "ok(proxy)" if fr is not None else "proxy無此幣"
+                if fr is not None:
+                    return float(fr)
+                # proxy 有回應但此幣為 null,繼續往下試直連(通常也會失敗,但保險)
+
         # 方法1: 幣安 fundingRate
         try:
             data = self._get("fapi_base", FAPI_BASES, "/fapi/v1/fundingRate",
