@@ -6,12 +6,17 @@
 #   3. ./deploy.sh
 set -euo pipefail
 
-REGION="asia-east1"               # 台灣：避開 Binance 對美國 IP 的封鎖
-SERVICE="crypto-agent"
-BUCKET="$(gcloud config get-value project)-crypto-cache"
-
 # 讀 .env（只取部署需要的鍵）
 source .env
+
+# 部署目標：.env 的 GCP_PROJECT 優先，未設則用 gcloud config 當前專案
+PROJECT="${GCP_PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
+: "${PROJECT:?未指定 GCP 專案：在 .env 設 GCP_PROJECT，或先跑 gcloud config set project <ID>}"
+REGION="${GCP_REGION:-asia-east1}"   # 台灣：避開 Binance 對美國 IP 的封鎖
+SERVICE="crypto-agent"
+BUCKET="${PROJECT}-crypto-cache"
+gcloud config set project "${PROJECT}" --quiet
+echo "▸ 部署目標：專案 ${PROJECT}，區域 ${REGION}"
 : "${PIN:?請在 .env 設定 PIN}"
 : "${APP_SECRET:?請在 .env 設定 APP_SECRET（隨機 32+ 字元）}"
 : "${REFRESH_SECRET:?請在 .env 設定 REFRESH_SECRET（隨機字串）}"
