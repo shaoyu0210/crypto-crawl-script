@@ -36,10 +36,12 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(STATIC_DIR):
     app.mount("/assets", StaticFiles(directory=os.path.join(STATIC_DIR, "assets")), name="assets")
 
-    @app.get("/{path:path}")
+    @app.api_route("/{path:path}", methods=["GET", "HEAD"])
     def spa(path: str):
         """SPA fallback：非 API 路徑一律回 index.html。"""
         full = os.path.join(STATIC_DIR, path)
         if path and os.path.isfile(full):
+            if path.endswith(".webmanifest"):
+                return FileResponse(full, media_type="application/manifest+json")
             return FileResponse(full)
         return FileResponse(os.path.join(STATIC_DIR, "index.html"))
