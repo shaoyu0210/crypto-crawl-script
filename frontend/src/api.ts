@@ -28,6 +28,23 @@ export async function api<T = any>(path: string): Promise<T> {
   return r.json()
 }
 
+export async function apiPost<T = any>(path: string): Promise<T> {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${getToken() ?? ''}` },
+  })
+  if (r.status === 401) {
+    clearToken()
+    location.reload()
+    throw new Error('未授權')
+  }
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}))
+    throw new Error(body.detail || `HTTP ${r.status}`)
+  }
+  return r.json()
+}
+
 export async function login(pin: string): Promise<void> {
   const r = await fetch('/api/auth/login', {
     method: 'POST',

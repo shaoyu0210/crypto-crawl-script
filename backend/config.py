@@ -111,6 +111,12 @@ NEWS_REFRESH_MIN = 15           # 新聞快取超過 15 分鐘才重抓
 CALENDAR_REFRESH_HOURS = 6      # 日曆快取超過 6 小時才重抓
 NEWS_WINDOW_HOURS = 6
 
+# ── Vertex AI（手動 Gemini 分析） ────────────────────────────
+GCP_PROJECT = _env("GCP_PROJECT")              # 空字串 = 用 ADC 偵測到的專案
+VERTEX_LOCATION = _env("VERTEX_LOCATION", "global")
+GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-3.5-pro")
+AI_CACHE_MIN = _env_int("AI_CACHE_MIN", 5)     # 同幣分析結果快取分鐘數（省 token 費）
+
 # ── 外部來源 ────────────────────────────────────────────────
 TRUMP_FEED_URL = "https://www.trumpstruth.org/feed"
 FF_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"

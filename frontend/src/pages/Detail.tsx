@@ -4,6 +4,7 @@ import { api, fetchKlines, fmtPct, fmtPrice, type Kline } from '../api'
 import { Chart, type Toggles } from '../components/Chart'
 import { SetupCard } from '../components/SetupCard'
 import { Gauge } from '../components/Gauge'
+import { AiPanel } from '../components/AiPanel'
 
 const INTERVALS = ['15m', '1h', '4h', '1d']
 const BIAS: Record<string, string> = { up: '↑ 偏多', down: '↓ 偏空', neutral: '— 中性' }
@@ -73,6 +74,8 @@ export function Detail({ symbol }: { symbol: string }) {
       )}
 
       <SetupCard setup={block.setup} />
+
+      <AiPanel symbol={block.symbol} />
 
       <div class="section-title">多時間框架</div>
       <div class="card">

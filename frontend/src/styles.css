@@ -88,5 +88,10 @@ body { padding-bottom: env(safe-area-inset-bottom); }
 .ev-row { display: flex; gap: 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
 .ev-time { color: var(--muted); font-size: 12px; flex: 0 0 auto; min-width: 86px; }
 
+/* ── AI 分析 ── */
+.ai-btn { width: 100%; padding: 13px; border-radius: 10px; border: 1px solid rgba(88,166,255,.4); background: rgba(88,166,255,.12); color: var(--blue); font-size: 15px; font-weight: 700; }
+.ai-btn:active { background: rgba(88,166,255,.22); }
+.ai-btn:disabled { opacity: .6; }
+
 .center { text-align: center; padding: 40px 0; color: var(--muted); }
 button.linklike { background: none; border: none; color: var(--blue); font-size: 13px; }

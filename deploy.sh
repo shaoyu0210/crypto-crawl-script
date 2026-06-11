@@ -24,7 +24,7 @@ DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 
 echo "▸ 啟用必要 API"
 gcloud services enable run.googleapis.com cloudscheduler.googleapis.com \
-  cloudbuild.googleapis.com storage.googleapis.com --quiet
+  cloudbuild.googleapis.com storage.googleapis.com aiplatform.googleapis.com --quiet
 
 echo "▸ 建立 GCS bucket（已存在則略過）: gs://${BUCKET}"
 gcloud storage buckets create "gs://${BUCKET}" --location="${REGION}" 2>/dev/null || true
@@ -37,7 +37,7 @@ gcloud run deploy "${SERVICE}" \
   --memory 512Mi --cpu 1 \
   --min-instances 0 --max-instances 1 \
   --timeout 300 \
-  --set-env-vars "PIN=${PIN},APP_SECRET=${APP_SECRET},REFRESH_SECRET=${REFRESH_SECRET},GCS_BUCKET=${BUCKET},DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL},LOCAL_MODE=0,TOP_N=${TOP_N:-10}"
+  --set-env-vars "PIN=${PIN},APP_SECRET=${APP_SECRET},REFRESH_SECRET=${REFRESH_SECRET},GCS_BUCKET=${BUCKET},DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL},LOCAL_MODE=0,TOP_N=${TOP_N:-10},GCP_PROJECT=${PROJECT},VERTEX_LOCATION=${VERTEX_LOCATION:-global},GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-pro}"
 
 URL=$(gcloud run services describe "${SERVICE}" --region "${REGION}" --format 'value(status.url)')
 echo "▸ 服務網址: ${URL}"
@@ -48,6 +48,10 @@ SA=$(gcloud run services describe "${SERVICE}" --region "${REGION}" \
 SA=${SA:-"$(gcloud projects describe "$(gcloud config get-value project)" --format 'value(projectNumber)')-compute@developer.gserviceaccount.com"}
 gcloud storage buckets add-iam-policy-binding "gs://${BUCKET}" \
   --member="serviceAccount:${SA}" --role="roles/storage.objectAdmin" --quiet
+
+echo "▸ 授權服務帳戶使用 Vertex AI（Gemini 分析）"
+gcloud projects add-iam-policy-binding "${PROJECT}" \
+  --member="serviceAccount:${SA}" --role="roles/aiplatform.user" --quiet > /dev/null
 
 echo "▸ 建立/更新 Cloud Scheduler（每 5 分鐘刷新）"
 gcloud scheduler jobs delete crypto-refresh --location "${REGION}" --quiet 2>/dev/null || true

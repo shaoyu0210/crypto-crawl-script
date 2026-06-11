@@ -4,7 +4,7 @@ from __future__ import annotations
 import requests as rq
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
-from .. import auth, store
+from .. import ai, auth, store
 from ..sources import binance
 
 router = APIRouter(prefix="/api", dependencies=[Depends(auth.require_auth)])
@@ -43,6 +43,17 @@ def get_news():
         "upcoming_events": snap.get("upcoming_events"),
         "event_window": snap.get("event_window"),
     }
+
+
+@router.post("/ai/analyze/{symbol}")
+def ai_analyze(symbol: str):
+    """手動觸發 Gemini 總結分析（同幣結果快取 AI_CACHE_MIN 分鐘）。"""
+    try:
+        return ai.analyze(symbol)
+    except ValueError as ex:
+        raise HTTPException(404, str(ex)) from ex
+    except Exception as ex:   # noqa: BLE001 — Vertex 錯誤以可讀訊息回前端
+        raise HTTPException(502, f"AI 分析失敗：{ex}") from ex
 
 
 @router.get("/klines")
