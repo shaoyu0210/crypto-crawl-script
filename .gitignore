@@ -2,11 +2,10 @@
 __pycache__/
 *.pyc
 .env
-reports/
-data/coins_cache.json
 .pytest_cache/
 .DS_Store
-
-test/
-
-*.json
+node_modules/
+backend/static/
+frontend/dist/
+/tmp/
+crypto_snapshot.json
